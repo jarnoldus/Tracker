@@ -58,7 +58,7 @@ void setup() {
   motor2_azi.setMaxSpeed(1000);
   motor2_azi.setAcceleration(200);
   
-  Serial.println("READY");
+  Serial.println("ACK");
 }
 
 void readSerialNonBlocking() {
@@ -84,7 +84,7 @@ void parseCommand(char* msg) {
   if (strcmp(msg, "STOP") == 0) {
     stopRequested = true;
     targetReady = false;
-    Serial.println("STOP received");
+    Serial.println("SR");   // STOP received
     return;
   }
 
@@ -98,7 +98,6 @@ void parseCommand(char* msg) {
     targetReady = true;
     alignmentReported = false;
     stopRequested = false;
-    Serial.println("ACK");
   }
 }
 
@@ -120,23 +119,25 @@ void loop() {
       
   if (targetReady) {
 
-    // Calculate difference between current reading of inClinometer and target position
+    // Calculate Angle delta
     float angleError = angularError(currentAngle, targetAltitude);
-    if (fabs(angleError) > 20.0) {
+      
+    if (fabs(angleError) > 5.0) {
       digitalWrite(ledG, HIGH);
 
       int angleDirection = (angleError > 0) ? 1 : -1;          
       motor1_alt.setSpeed(angleDirection * 300);   // speed in steps/sec
       motor1_alt.runSpeed();                       // continuous speed, non-blocking
-    
+      
     } else if (fabs(angleError) <= 5.0) {          // prevent jitter near the threshold
       motor1_alt.setSpeed(0);                      // stop motor
       digitalWrite(ledG, LOW); 
     }
 
-    // Calculate difference between current reading if magnetometer and target position
+    // Calculate Heading delta
     float headingError = angularError(currentHeading, targetAzimuth);
-    if (fabs(headingError) > 20.0) {
+   
+    if (fabs(headingError) > 5.0) {
       digitalWrite(ledY, HIGH);
     
       int headingDirection = (headingError > 0) ? 1 : -1;          
@@ -152,15 +153,20 @@ void loop() {
     unsigned long now = millis();
     if(now - lastFeedback >= feedbackInterval){
       lastFeedback = now;
-      char buffer[64];
-      sprintf(buffer, "... angle delta: %.1f | heading delta: %.1f", angleError, headingError);
-      Serial.println(buffer);
+      //char buffer[64];
+      //sprintf(buffer, "... angle delta: %d | heading delta: %d", angleError, headingError);
+      //Serial.println(buffer);
+
+      Serial.print("... angle delta: ");
+      Serial.print(angleError, 2);
+      Serial.print("... heading delta: ");
+      Serial.print(headingError, 2);
     }
     
     targetReady = false;
 
     if (!alignmentReported && fabs(angleError) <= 5.0 && fabs(headingError) <= 5.0) {
-      Serial.println("Target aligned");
+      Serial.println("TA");   // Target aligned
       alignmentReported = true;
     }
   }

@@ -49,6 +49,8 @@ sudo init 6
 # === Serial setup to talk to Arduino
 ser = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
 
+response = 'ACK'
+
 #if len(sys.argv) < 2:
     #print("No target specified.")
     #sys.exit(1)
@@ -106,7 +108,7 @@ try:
 except Exception as e:
     logging.error(f"Skyfield calc failed: {e}")
 
-while observerStatus = True:
+while observerStatus == True:
     ts = load.timescale()
     t = ts.now()
 
@@ -127,8 +129,11 @@ while observerStatus = True:
         logging.info(f'tx--> Target Angle: {alt.degrees:.2f} | Heading: {az.degrees:.2f}')
         
         try:
-            ser.write(command.encode('utf-8'))
-            ser.flush()
+            if response == 'ACK':
+                ser.write(command.encode('utf-8'))
+                ser.flush()
+                response = ''
+                
         except Exception as e:
             logging.error(f"Serial write error: {e}")
             continue   
@@ -138,14 +143,20 @@ while observerStatus = True:
             if ser.in_waiting:
                 response = ser.readline().decode('utf-8', errors='ignore').strip()
                 if response == "ACK":
-                    logging.info("Arduino acknowledged command")
-                else:
-                    logging.warning(f"Unexpected response: {response}")
+                    logging.info("<-- rx ... Arduino ready")
+                elif response == "TA":
+                    logging.info(f"<--rx ...target aligned")
+                    response = "ACK"
+                elif response == "SR":
+                    logging.info(f"<--rx !!! STOP received")
+                else: 
+                    logging.info(f"<--rx {response}")
+                    
         except Exception as e:
             logging.error(f"Serial read error: {e}")
 
     else:
         logging.info("Target is below the horizon")
 
-    time.sleep(0.3)  # Avoid flooding Arduino
+    time.sleep(3)  # Avoid flooding Arduino
         
