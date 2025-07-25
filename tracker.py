@@ -1,4 +1,5 @@
 from skyfield.api import load, Topos, Star
+from datetime import datetime
 import geocoder
 import os
 import time
@@ -6,11 +7,14 @@ import sys
 import serial
 import logging
 
+today = datetime.now().strftime("%Y%m%d")
+log_filename = f"/home/ashleyjiang/startracker/logs/logfile_{today}.log"
+
 logging.basicConfig(
-    level=logging.INFO,                      # Could also be DEBUG, WARNING, etc.
+    level=logging.INFO,                      # Could also be DEBUG, ERROR, WARNING, etc.
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/home/ashleyjiang/startracker/logs/logfile.log"),  # Logs go to a file
+        logging.FileHandler(log_filename),
         logging.StreamHandler()              # Also print to console
     ]
 )
@@ -18,18 +22,32 @@ logging.basicConfig(
 logging.info('starting')
 
 """
-#cd startracker
-#$ source star-env/bin/activate
+Frequently used command on Rasperry Pi
 
-#sudo fuser -k /dev/ttyACM0
+pwd
+ls -l
+
+cd startracker
+source star-env/bin/activate
+
+fuser /dev/ttyACM0
+
+sudo fuser -k /dev/ttyACM0
+
+ps -ef |grep -i ttyACM
+
+# for shutting down Pi
+sudo shutdown -h now
+sudo init 0
+
+# for restarting Pi
+sudo reboot
+sudo init 6
+
 """
 
-
-
-# === Serial setup ===
+# === Serial setup to talk to Arduino
 ser = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
-
-#print("Listening to Arduino")
 
 #if len(sys.argv) < 2:
     #print("No target specified.")
@@ -76,28 +94,28 @@ target = planets[target_name]
 
 #print("Tracking target until it sets...\n")
 
-while True:
-    # g = geocoder.ip('me')  # Get location from public IP
-    lat, lon = 39.9, 116.4    # Test coordinates
-    # lat, lon = g.latlng    # Calculates location based on IP address
+# g = geocoder.ip('me')  # Get location from public IP
+# lat, lon = g.latlng    # Calculates location based on IP address
+lat, lon = 39.9, 116.4    # Test coordinates
 
+try:
+    # Create observer based on IP-derived coordinates
+    observer = earth + Topos(latitude_degrees = lat, longitude_degrees = lon, elevation_m = 1)
+    #observer = earth + Topos(latitude_degrees=lat, longitude_degrees=lon)
+    observerStatus = True    
+except Exception as e:
+    logging.error(f"Skyfield calc failed: {e}")
+
+while observerStatus = True:
     ts = load.timescale()
     t = ts.now()
 
     try:
-        # Create observer based on IP-derived coordinates
-        observer = earth + Topos(latitude_degrees=lat, longitude_degrees=lon, elevation_m=1)
-        #observer = earth + Topos(latitude_degrees=lat, longitude_degrees=lon)
-    except:
-        pass    
-
-    try:
-        # Compute Target position
+        # Compute Target position based on observer's position and time
         astrometric = observer.at(t).observe(target)
         alt, az, distance = astrometric.apparent().altaz()
-        
-    except:
-        pass
+    except Exception as e:
+        logging.info(e)      
     
     #os.system('clear')
     #print(f"Observer \n  Latitude: {lat}° \n  Longitude: {lon}°\n")
@@ -105,33 +123,29 @@ while True:
     
     #if alt.degrees > 0 or alt.degrees < 0:
     if alt.degrees > 0:
-        
         command = f"{az.degrees:.2f} {alt.degrees:.2f}\n"
+        logging.info(f'tx--> Target Angle: {alt.degrees:.2f} | Heading: {az.degrees:.2f}')
         
-        logging.info(f'tx--> Object Angle: {alt.degrees:.2f} | Heading: {az.degrees:.2f}')
-        
-        #with serial.Serial('/dev/ttyACM0', 115200, timeout=1) as ser:
         try:
-            #while ser.readline().strip() != b'Ready':
-            #    pass
             ser.write(command.encode('utf-8'))
+            ser.flush()
         except Exception as e:
-            logging.info(e)      
-        
-    
+            logging.error(f"Serial write error: {e}")
+            continue   
+
+
         try:
             if ser.in_waiting:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                if line == "ACK":
+                response = ser.readline().decode('utf-8', errors='ignore').strip()
+                if response == "ACK":
                     logging.info("Arduino acknowledged command")
-            #if line:
-                #logging.info('<--rx ' + line)
+                else:
+                    logging.warning(f"Unexpected response: {response}")
         except Exception as e:
             logging.error(f"Serial read error: {e}")
-         
+
     else:
-        #print(f"Target is now below the horizon (Altitude: {alt.degrees:.2f}°).")
-        logging.info('x')     
-        
-    time.sleep(0.2)
+        logging.info("Target is below the horizon")
+
+    time.sleep(0.3)  # Avoid flooding Arduino
         

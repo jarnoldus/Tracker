@@ -2,23 +2,15 @@
 #include <MPU6050.h>
 #include <QMC5883LCompass.h>
 #include <Wire.h>
-//#include <math.h>
+#include <math.h>
 
 MPU6050 mpu;
 QMC5883LCompass compass;
 
-// Define motor interface type
-#define MOTOR_INTERFACE_TYPE 4  // 4-pin full-step mode
+#define MOTOR_INTERFACE_TYPE 4  // // Define motor interface type: 4-pin full-step mode
 
-// Stepper 1 (Tilt): IN4, IN3, IN2, IN1 = 8, 9, 10, 11
-AccelStepper motor1_alt(MOTOR_INTERFACE_TYPE, 11, 9, 10, 8); // IN1, IN3, IN2, IN4
-
-// Stepper 2 (Heading): IN4, IN3, IN2, IN1 = 4, 5, 6, 7
-AccelStepper motor2_azi(MOTOR_INTERFACE_TYPE, 7, 5, 6, 4);   // IN1, IN3, IN2, IN4
-
-// Stepper status
-bool motor1_altActive = true;
-bool motor2_aziActive = true;
+AccelStepper motor1_alt(MOTOR_INTERFACE_TYPE, 11, 9, 10, 8); // Altitude motor: IN1-IN4 = 11, 9, 10, 8
+AccelStepper motor2_azi(MOTOR_INTERFACE_TYPE, 7, 5, 6, 4);   // Azimuth motor:  IN1-IN4 = 7, 5, 6, 4
 
 // LED Pins
 const int ledY = A0;
@@ -26,126 +18,25 @@ const int ledB = A1;
 const int ledR = A2;
 const int ledG = A3;
 
-char serialBuffer[50];
-byte bufferIndex = 0;
+// Serial buffer and timeout
+#define MAX_INPUT 64
+char input[MAX_INPUT];
+byte index = 0;
+unsigned long lastCharTime = 0;
+const unsigned long serialTimeout = 100;  // ms
 
-bool objectReady = true;
+// Arduino-to-Pi feedback timing
+unsigned long lastFeedback = 0;
+unsigned long feedbackInterval = 500;
+
+float targetAzimuth = 0.0;
+float targetAltitude = 0.0;
+bool targetReady = false;
 bool stopRequested = false;
-
-float objectAzimuth = 0.0;
-float objectAltitude = 0.0;
-
-unsigned long lastPrint = 0;
-const unsigned long printInterval = 1000;
-
-
-/*
-void readSerialNonBlocking() {
-  while (Serial.available() > 0) {
-    
-    digitalWrite(ledB, HIGH);
-    digitalWrite(ledB, LOW);
-    
-    char inChar = Serial.read();
-    
-    if (inChar == '\n') {
-      serialBuffer[bufferIndex] = '\0'; // null-terminate string
-      
-      // Reset for next message (a different object selected)
-      bufferIndex = 0;
-      
-      // Check if it is a STOP command
-      if (strcmp(serialBuffer, "STOP") == 0) {
-        stopRequested = true;
-        objectReady = false;
-        return;
-      }
-      
-      // Try to parse two floats from butter
-      char* ptr = strtok(serialBuffer, " ");
-      if (ptr != nullptr) {
-        
-        float alt = atof(ptr);
-        ptr = strtok(nullptr, " ");
-        
-        if (ptr != nullptr) {
-          
-          float az = atof(ptr);
-          objectAltitude = alt;
-          objectAzimuth = az;
-          objectReady = true;
-          stopRequested = false;
-          return;
-          
-        }
-      }
-      
-      Serial.println("ACK");
-
-      
-    } else {  // If parsing fails, discard message
-        //add char to buffer if space
-        if (bufferIndex < sizeof(serialBuffer) - 1) {
-          serialBuffer[bufferIndex++] = inChar;
-        } else {
-            bufferIndex = 0; //overflow safety
-        }
-    }
-  }
-}
-*/
-
-void readSerialNonBlocking() {
-  static char incomingChar;
-  
-  while (Serial.available()) {
-
-    //Serial.println('Ready');
-    incomingChar = Serial.read();
-
-    if (incomingChar == '\n') {
-      serialBuffer[bufferIndex] = '\0';
-      bufferIndex = 0;
-
-      if (strcmp(serialBuffer, "STOP") == 0) {
-        stopRequested = true;
-        objectReady = false;
-        //Serial.println("ACK:STOP");
-        return;
-      }
-
-      char* ptr = strtok(serialBuffer, " ");
-      if (ptr != nullptr) {
-        float alt = atof(ptr);
-        ptr = strtok(nullptr, " ");
-        if (ptr != nullptr) {
-          float az = atof(ptr);
-          objectAltitude = alt;
-          objectAzimuth = az;
-          objectReady = true;
-          stopRequested = false;
-          //Serial.println("ACK:OK");
-          return;
-        }
-      }
-
-      // If parsing fails
-      Serial.println("ACK:ERR");
-    } else {
-      if (bufferIndex < sizeof(serialBuffer) - 1) {
-        serialBuffer[bufferIndex++] = incomingChar;
-      } else {
-        bufferIndex = 0; // overflow protection
-      }
-    }
-  }
-}
-
+bool alignmentReported = false;
 
 //float readInclinometer();
 //float readMagnetometer();
-
-
 
 void setup() {
   Serial.begin(115200);
@@ -162,147 +53,140 @@ void setup() {
   digitalWrite(ledY, LOW);
   digitalWrite(ledG, LOW);
 
-  motor1_alt.setMaxSpeed(1000);     // up to 800 steps/sec is safe
-  motor1_alt.setAcceleration(200); // up to 1500 steps/sec is still safe
-
+  motor1_alt.setMaxSpeed(1000);
+  motor1_alt.setAcceleration(200);
   motor2_azi.setMaxSpeed(1000);
   motor2_azi.setAcceleration(200);
   
+  Serial.println("READY");
 }
 
+void readSerialNonBlocking() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    lastCharTime = millis();
+
+    if (c == '\n') {
+      input[index] = '\0';
+      parseCommand(input);
+      index = 0;
+    } else if (index < MAX_INPUT - 1) {
+      input[index++] = c;
+    }
+  }
+
+  if (index > 0 && millis() - lastCharTime > serialTimeout) {
+    index = 0;  // Flush partial message
+  }
+}
+
+void parseCommand(char* msg) {
+  if (strcmp(msg, "STOP") == 0) {
+    stopRequested = true;
+    targetReady = false;
+    Serial.println("STOP received");
+    return;
+  }
+
+  // Expecting "az alt"
+  char* azStr = strtok(msg, " ");
+  char* altStr = strtok(nullptr, " ");
+
+  if (azStr && altStr) {
+    targetAzimuth = atof(azStr);
+    targetAltitude = atof(altStr);
+    targetReady = true;
+    alignmentReported = false;
+    stopRequested = false;
+    Serial.println("ACK");
+  }
+}
 
 void loop() {
-  // Always allow motor stepping
+  // Always allow motors stepping
   motor1_alt.run();  
   motor2_azi.run();
   
   readSerialNonBlocking(); 
-  //Serial.println(objectReady);
-
-  //Serial.println(stopRequested);
   
-  if (stopRequested) {
-      // Gracefully decelerate to stop
-      motor1_alt.stop();
-      motor2_azi.stop();
-    
-      // OR
-      // motor1_alt.setCurrentPosition(0);   // Optional reset
-      // motor2_azi.setCurrentPosition(0);   // Optional reset
+  if (stopRequested) {        // Gracefully decelerate to stop
+      motor1_alt.stop();      // motor1_alt.setCurrentPosition(0);   // Optional reset
+      motor2_azi.stop();      // motor2_azi.setCurrentPosition(0);   // Optional reset
+      return;    
   }
 
   float currentAngle = readInclinometer();
   float currentHeading = readMagnetometer();
       
-  //if (objectReady) {
+  if (targetReady) {
 
-
-    if (angularError(currentAngle, objectAltitude) > 20) {
+    // Calculate difference between current reading of inClinometer and target position
+    float angleError = angularError(currentAngle, targetAltitude);
+    if (fabs(angleError) > 20.0) {
       digitalWrite(ledG, HIGH);
-      digitalWrite(ledG, LOW);        
-      motor1_alt.move(500);
-    } else {
-      motor1_alt.stop();
-    }
+
+      int angleDirection = (angleError > 0) ? 1 : -1;          
+      motor1_alt.setSpeed(angleDirection * 300);   // speed in steps/sec
+      motor1_alt.runSpeed();                       // continuous speed, non-blocking
     
-    if (angularError(currentHeading, objectAzimuth) > 50) {
+    } else if (fabs(angleError) <= 5.0) {          // prevent jitter near the threshold
+      motor1_alt.setSpeed(0);                      // stop motor
+      digitalWrite(ledG, LOW); 
+    }
+
+    // Calculate difference between current reading if magnetometer and target position
+    float headingError = angularError(currentHeading, targetAzimuth);
+    if (fabs(headingError) > 20.0) {
       digitalWrite(ledY, HIGH);
+    
+      int headingDirection = (headingError > 0) ? 1 : -1;          
+      motor2_azi.setSpeed(headingDirection * 300);  // speed in steps/sec
+      motor2_azi.runSpeed();                        // continuous speed, non-blocking
+    
+    } else if (fabs(headingError) <= 5.0) {         // prevent jitter near the threshold
+      motor2_azi.setSpeed(0);                       // stop motor
       digitalWrite(ledY, LOW);
-      motor2_azi.move(500);
-    } else {
-      motor2_azi.stop();
     }
 
+    // Send feedback to Pi at certain interval
+    unsigned long now = millis();
+    if(now - lastFeedback >= feedbackInterval){
+      lastFeedback = now;
+      char buffer[64];
+      sprintf(buffer, "... angle delta: %.1f | heading delta: %.1f", angleError, headingError);
+      Serial.println(buffer);
+    }
+    
+    targetReady = false;
 
-
-  unsigned long now = millis();
-  if(now - lastPrint >= printInterval){
-    lastPrint = now;
-    char buffer[50];
-    sprintf(buffer, "... Angle delta: %d | heading delta: %d", angularError(currentAngle, objectAltitude), angularError(currentHeading, objectAzimuth));
-    Serial.println(buffer);
+    if (!alignmentReported && fabs(angleError) <= 5.0 && fabs(headingError) <= 5.0) {
+      Serial.println("Target aligned");
+      alignmentReported = true;
+    }
   }
-    
-    
-    objectReady = false;
-
-      
-  //}
-
-    //sprintf(buffer, "Tracker Angle: %d | Heading: %d", currentAngle, currentHeading);
+    //sprintf(buffer, "Tracker Angle: %.2f | Heading: %.2f", currentAngle, currentHeading);
     //Serial.println(buffer);
-      
+    
 }
 
-
-float angularError(float current, float target)
-{
-  float delta = fmod((target - current + 540.0), 360.0) - 180.0;
-  return delta; 
+float angularError(float current, float target) {
+  float diff = fmod((target - current + 540.0), 360.0) - 180.0;
+  return diff;
 }
-
 
 float readInclinometer() {
-
   int16_t ax, ay, az;
-  //int16_t gx, gy, gz; // not using gyro data
-
-  // Read accelerometer and gyroscope values
-  //mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
   mpu.getAcceleration(&ax, &ay, &az);
-
   float Ax = ax/16384.0;
   float Ay = ay/16384.0;
   float Az = az/16384.0;
-
-  float updatedAngle = atan2(Ax, sqrt(Ay * Ay + Az * Az)) * 180 / PI;
-  //float roll  = atan2(Ay, sqrt(Ax * Ax + Az * Az)) * 180 / PI;
-  
-  //Serial.print("Accel X: "); Serial.print(ax);
-  //Serial.print(" Y: "); Serial.print(ay);
-  //Serial.print(" Z: "); Serial.print(az);
-  //Serial.print(" | Gyro X: "); Serial.print(gx);
-  //Serial.print(" Y: "); Serial.print(gy);
-  //Serial.print(" Z: "); Serial.println(gz);
-
-  //Serial.print("Pitch: "); Serial.print(pitch);
-  //Serial.print("| Roll: "); Serial.println(roll);
-
-  return updatedAngle;
-
+  return atan2(Ax, sqrt(Ay * Ay + Az * Az)) * 180 / PI;
 }
-
-
 
 float readMagnetometer() {
   compass.read();
-
-  //int x = compass.getX();
-  //int y = compass.getY();
-  //int z = compass.getZ();
-  int updatedHeading = compass.getAzimuth();
-
-  if (updatedHeading < 0)   updatedHeading += 360;
-  if (updatedHeading > 360) updatedHeading -= 360;
- 
-  //float heading_truenorth = atan2(y, x) * 180.0 / PI;
-  //if (heading_truenorth < 0) heading_truenorth += 360;
-
-  // Apply magnetic declination
-  //float declination = 14.4; // assumed value for my current location for now
-
-  //heading_truenorth += declination;
-  //if (heading_truenorth < 0) heading_truenorth += 360;
-  //if (heading_truenorth > 360) heading_truenorth -= 360;
-  
-
-  //Serial.print("X: "); Serial.print(x);
-  //Serial.print(" Y: "); Serial.print(y);
-  //Serial.print(" Z: "); Serial.print(z);
-  
-  //Serial.print(" heading: "); Serial.print(heading);
-  //Serial.print(" heading_truenorth: "); Serial.println(heading_truenorth);
-
-  return updatedHeading;
- }
+  int heading = compass.getAzimuth();
+  if (heading < 0)   heading += 360;
+  if (heading > 360) heading -= 360;
+  return heading;
+}
