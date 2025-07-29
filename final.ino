@@ -103,8 +103,8 @@ void parseCommand(char* msg) {
 
 void loop() {
   // Always allow motors stepping
-  motor1_alt.run();  
-  motor2_azi.run();
+  //motor1_alt.run();  
+  //motor2_azi.run();
   
   readSerialNonBlocking(); 
   
@@ -157,17 +157,22 @@ void loop() {
       //sprintf(buffer, "... angle delta: %d | heading delta: %d", angleError, headingError);
       //Serial.println(buffer);
 
-      Serial.print("... angle delta: ");
+      Serial.print("Tracker angle: ");
+      Serial.print(currentAngle, 2);
+      Serial.print(" | heading: ");
+      Serial.println(currentHeading, 2);
+      
+      Serial.print("Delta angle: ");
       Serial.print(angleError, 2);
-      Serial.print("... heading delta: ");
-      Serial.print(headingError, 2);
+      Serial.print(" | heading: ");
+      Serial.println(headingError, 2);
     }
     
-    targetReady = false;
 
     if (!alignmentReported && fabs(angleError) <= 5.0 && fabs(headingError) <= 5.0) {
       Serial.println("TA");   // Target aligned
       alignmentReported = true;
+      targetReady = false;
     }
   }
     //sprintf(buffer, "Tracker Angle: %.2f | Heading: %.2f", currentAngle, currentHeading);
@@ -181,12 +186,32 @@ float angularError(float current, float target) {
 }
 
 float readInclinometer() {
+  int16_t ax_raw, ay_raw, az_raw, gx, gy, gz;
+  mpu.getMotion6(&ax_raw, &ay_raw, &az_raw, &gx, &gy, &gz);
+
+  // Convert to float to avoid overflow
+  float ax = (float)ax_raw;
+  float ay = (float)ay_raw;
+  float az = (float)az_raw;
+
+  // Add a small epsilon to prevent sqrt(0)
+  float epsilon = 1e-6;
+
+  float pitch  = atan2(ay, sqrt(ax * ax + az * az + epsilon)) * 180.0 / PI;
+  //float roll = atan2(ax, sqrt(ay * ay + az * az + epsilon)) * 180.0 / PI;
+
+
+  /*
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
+
   float Ax = ax/16384.0;
   float Ay = ay/16384.0;
   float Az = az/16384.0;
-  return atan2(Ax, sqrt(Ay * Ay + Az * Az)) * 180 / PI;
+  float pitch = atan2(Ax, sqrt(Ay * Ay + Az * Az)) * 180 / PI;
+  */
+  
+  return pitch;
 }
 
 float readMagnetometer() {
